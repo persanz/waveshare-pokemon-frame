@@ -1,0 +1,9 @@
+# Waveshare Pokémon frame
+
+An offline slideshow for the RP2350-Touch-LCD-1.54. Pokémon artwork is sourced from the [PokeAPI sprite repository](https://github.com/PokeAPI/sprites) high-resolution `official-artwork` PNGs, transformed into native 240 × 240 RGB565 frames on the SD card — matching the display’s physical resolution for crisp full-screen rendering. Verified English Pokémon names (from PokeAPI) are drawn in a footer band on each sprite; alternate forms (Mega, Gigantamax, regional, and more) are handled sensibly. Artwork and Pokémon names are the property of their respective owners.
+
+Move or shake the device to advance to the next sprite; the current sprite stays on screen until motion is detected. Hold the power button for two seconds and release it to turn the board off on battery power. The SD card must be inserted and contain `/waveshare_pokemon_frame/pokemon_hd.dat`.
+
+Files on the board: `main.py`, `frame_app.mpy`, `sdcard.mpy`, and the Waveshare display driver `lcd.py`. The former clock app is kept separately in `../pico-cuadrat-rellotge`; restoring it requires copying its `main.py` back onto the board and resetting it. The previous generation archive (`pokemon_large.dat`, 160 × 160) is preserved on the card and in the repo for recovery.
+
+`build_sprites.py` builds the sprite archive from a local checkout of PokeAPI official artwork using Pillow. Each sprite is alpha-cropped, resized to fit a 240 × 240 canvas (LANCZOS), and converted to RGB565. The archive format is a 32-bit count followed by 16-byte entries (Pokémon number, offset, compressed size, absolute name offset), then raw DEFLATE RGB565 images (1 KiB compression window), then a null-terminated UTF-8 name table. The `.mpy` modules are compiled with MicroPython 1.29 mpy-cross to fit the board’s memory. It uses source files from `/tmp/pokemon-sprites/sprites/pokemon/other/official-artwork` and verified labels from `/tmp/art_labels.json` by default.
