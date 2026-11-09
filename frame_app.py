@@ -1,5 +1,5 @@
 import time
-from machine import Pin, SPI, I2C, ADC
+from machine import Pin, SPI, I2C
 
 def start(lcd, power, button):
     import os
@@ -105,33 +105,6 @@ def start(lcd, power, button):
                         lcd.text(line2, (240 - len(line2)*8)//2, 232, ORANGE)
             else:
                 lcd.text(num_label, (240 - len(num_label)*8)//2, 224, WHITE)
-            # Battery percentage bottom-right, colour-coded by level.
-            try:
-                adc = ADC(Pin(29))
-                raw = sum(adc.read_u16() for _ in range(8)) // 8
-                if raw < 15000:
-                    # On USB power: ADC reads low; show charging instead of a wrong 0%.
-                    bat_label = 'CHG'
-                    bat_col = 0x001F  # appears green
-                else:
-                    # linear map: 3.3V(empty)..4.2V(full) on the 9.9V ADC scale
-                    pct = (raw - 21850) * 100 // (27800 - 21850)
-                    if pct < 0:
-                        pct = 0
-                    elif pct > 100:
-                        pct = 100
-                    # panel swaps channels: send G->red, B->green, R->blue
-                    if pct >= 50:
-                        bat_col = 0x001F  # appears green
-                    elif pct >= 20:
-                        bat_col = 0x07FF  # appears yellow
-                    else:
-                        bat_col = 0x07E0  # appears red
-                    bat_label = '%d%%' % pct
-                lcd.text(bat_label, 240 - len(bat_label)*8 - 4, 228, bat_col)
-                print('BAT live raw', raw, 'label', bat_label, 'col', bat_col)
-            except Exception as e:
-                print('BAT err', e)
             lcd.show()
         print('Displaying Pokemon', number, name)
 
@@ -179,6 +152,7 @@ def start(lcd, power, button):
         print('Splash skip:', e)
 
     index = 0  # always start from the first Pokémon on every power-on
+    index = 0  # always start from the first Pokémon on every power-on
     last_motion = time.ticks_ms()
     last_sample = time.ticks_ms()
     previous = None
@@ -215,6 +189,7 @@ def start(lcd, power, button):
     right_prev = 1
     left_down_since = None
     right_down_since = None
+
     while True:
         try:
             if wdt is not None:
