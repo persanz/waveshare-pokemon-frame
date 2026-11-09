@@ -163,6 +163,14 @@ def start(lcd, power, button):
         print('Image error:', e)
         message('IMAGE ERROR', 'Check SD files')
 
+    # Hardware watchdog: if the main loop ever blocks (e.g. a hung I2C read on
+    # battery), the board resets instead of freezing forever.
+    try:
+        from machine import WDT
+        wdt = WDT(timeout=8000)
+    except Exception:
+        wdt = None
+
     # Two buttons used: LEFT=GPIO24(previous + power on/off on long), RIGHT=GPIO25
     # (next + first on long). Middle und GPIO16 is unused.
     left_btn = Pin(24, Pin.IN, Pin.PULL_UP)
@@ -181,90 +189,100 @@ def start(lcd, power, button):
     left_down_since = None
     right_down_since = None
     while True:
-        left = _debounce(left_btn, left_prev)
-        right = _debounce(right_btn, right_prev)
-        now = time.ticks_ms()
+        try:
+            if wdt is not None:
+                wdt.feed()
+            left = _debounce(left_btn, left_prev)
+            right = _debounce(right_btn, right_prev)
+            now = time.ticks_ms()
 
-        # Left button: short press -> previous; long press -> power on/off
-        if left != left_prev:
-            if left == 0:
-                left_down_since = now
+            # Left button: short press -> previous; long press -> power off
+            if left != left_prev:
+                if left == 0:
+                    left_down_since = now
+                else:
+                    if left_down_since is not None:
+                        if time.ticks_diff(now, left_down_since) < 1500:
+                            if not shutdown:
+                                index = (index - 1) % count
+                                show_sprite(index)
+                                previous = None
+                                motion_samples = 0
+                    left_down_since = None
+                left_prev = left
             else:
-                if left_down_since is not None:
-                    if time.ticks_diff(now, left_down_since) < 1500:
-                        if not shutdown:
-                            index = (index - 1) % count
+                if left == 0 and left_down_since is not None:
+                    if time.ticks_diff(now, left_down_since) >= 1500:
+                        # Power-off cycle: show goodbye frame, then cut battery power.
+                        try:
+                            lcd.bl.duty_u16(32768)
+                            draw_goodbye()
+                        except Exception:
+                            pass
+                        time.sleep_ms(1500)
+                        lcd.bl.duty_u16(0)
+                        lcd.fill(0)
+                        lcd.show()
+                        print('POWER OFF')
+                        power.value(0)
+                        while True:
+                            if wdt is not None:
+                                wdt.feed()
+                            time.sleep_ms(100)
+
+            # Right button: short press -> next; long press -> first Pokémon
+            if right != right_prev:
+                if right == 0:
+                    right_down_since = now
+                else:
+                    if right_down_since is not None and not shutdown:
+                        if time.ticks_diff(now, right_down_since) < 1500:
+                            index = (index + 1) % count
                             show_sprite(index)
                             previous = None
                             motion_samples = 0
-                left_down_since = None
-            left_prev = left
-        else:
-            if left == 0 and left_down_since is not None:
-                if time.ticks_diff(now, left_down_since) >= 1500:
-                    # Power-off cycle: show procedural goodbye frame, then cut battery power.
-                    try:
-                        lcd.bl.duty_u16(32768)
-                        draw_goodbye()
-                    except Exception:
-                        pass
-                    time.sleep_ms(1500)
-                    lcd.bl.duty_u16(0)
-                    lcd.fill(0)
-                    lcd.show()
-                    print('POWER OFF')
-                    power.value(0)
-                    while True:
-                        time.sleep_ms(100)
-                    left_down_since = None  # (unreachable) consume
-
-        # Right button: short press -> next; long press -> first Pokémon
-        if right != right_prev:
-            if right == 0:
-                right_down_since = now
+                    right_down_since = None
+                right_prev = right
             else:
-                if right_down_since is not None and not shutdown:
-                    if time.ticks_diff(now, right_down_since) < 1500:
-                        index = (index + 1) % count
+                if right == 0 and right_down_since is not None and not shutdown:
+                    if time.ticks_diff(now, right_down_since) >= 2000:
+                        index = 0
                         show_sprite(index)
                         previous = None
                         motion_samples = 0
-                right_down_since = None
-            right_prev = right
-        else:
-            if right == 0 and right_down_since is not None and not shutdown:
-                if time.ticks_diff(now, right_down_since) >= 2000:
-                    index = 0
-                    show_sprite(index)
+                        right_down_since = None
+
+            if not shutdown and time.ticks_diff(now, last_sample) >= 100:
+                last_sample = now
+                try:
+                    raw = imu.readfrom_mem(0x6b, 0x35, 12)
+                    values = [raw[i] | (raw[i + 1] << 8) for i in range(0, 12, 2)]
+                    values = [v - 65536 if v >= 32768 else v for v in values]
+                    if previous is not None:
+                        acceleration = max(abs(values[i] - previous[i]) for i in range(3))
+                        rotation = max(abs(values[i]) for i in range(3, 6))
+                        if (acceleration > 2200 or rotation > 5000):
+                            motion_samples += 1
+                        else:
+                            motion_samples = 0
+                        if (motion_samples >= MOTION_NEEDED
+                                and time.ticks_diff(now, last_motion) >= MOTION_COOLDOWN):
+                            last_motion = now
+                            motion_samples = 0
+                            index = random.randrange(count)  # random Pokémon
+                            show_sprite(index)
+                            previous = None
+                            continue
+                    previous = values
+                except OSError:
                     previous = None
                     motion_samples = 0
-                    right_down_since = None
-
-        if not shutdown and time.ticks_diff(now, last_sample) >= 100:
-            last_sample = now
-            try:
-                raw = imu.readfrom_mem(0x6b, 0x35, 12)
-                values = [raw[i] | (raw[i + 1] << 8) for i in range(0, 12, 2)]
-                values = [v - 65536 if v >= 32768 else v for v in values]
-                if previous is not None:
-                    acceleration = max(abs(values[i] - previous[i]) for i in range(3))
-                    rotation = max(abs(values[i]) for i in range(3, 6))
-                    if (acceleration > 2200 or rotation > 5000):
-                        motion_samples += 1
-                    else:
-                        motion_samples = 0
-                    if (motion_samples >= MOTION_NEEDED
-                            and time.ticks_diff(now, last_motion) >= MOTION_COOLDOWN):
-                        last_motion = now
-                        motion_samples = 0
-                        index = random.randrange(count)  # random Pokémon on movement
-                        show_sprite(index)
-                        previous = None
-                        continue
-                previous = values
-            except OSError:
-                previous = None
-                motion_samples = 0
-        time.sleep_ms(50)
-        # diagnostic: catch any loop crash so the board doesn't hang silently
-        # (wrapped in next iterations by the outer try below)
+            time.sleep_ms(50)
+        except Exception as e:
+            # Never let a transient error kill the frame; log and keep going.
+            print('loop err:', e)
+            previous = None
+            motion_samples = 0
+            left_prev = left_btn.value()
+            right_prev = right_btn.value()
+            time.sleep_ms(100)
