@@ -12,7 +12,8 @@ def start(lcd, power, button):
     ORANGE = 0x20fd
     BLACK = 0x0000
     DATA = '/sd/waveshare_pokemon_frame/pokemon_hd.dat'
-    MOTION_COOLDOWN = 3000
+    MOTION_COOLDOWN = 1500
+    MOTION_THRESHOLD = 2200  # gentler shakes for children
     W = 240  # sprite canvas / screen width
     # Landscape is achieved via MADCTL (main.py) so art and text rotate together.
     LANDSCAPE = False
@@ -28,7 +29,7 @@ def start(lcd, power, button):
     def draw_goodbye():
         """Procedural goodbye frame: Poké Ball + text."""
         import math
-        RED = 0xf800
+        RED = 0x00f8  # byte-swapped RGB565 red for this display
         Cx = 120
         R = 60
         cy = 110
@@ -62,10 +63,23 @@ def start(lcd, power, button):
             return ''
 
 
+    current_art_id = 0
+    current_name = ''
+    description_open = False
+    description_page = 0
+    description_pages = 1
+
     def show_sprite(index):
+        nonlocal current_art_id, current_name, description_open
+        description_open = False
+        # The order file maps Pokédex order to entries in the artwork archive.
+        with open('/pokemon_order.bin', 'rb') as order:
+            order.seek(2 + index * 2)
+            index = struct.unpack('<H', order.read(2))[0]
         with open(DATA, 'rb') as f:
             f.seek(4 + index * 16)
             number, offset, size, name_offset = struct.unpack('<IIII', f.read(16))
+            current_art_id = number
             f.seek(offset)
             stream = deflate.DeflateIO(f, deflate.RAW, 10)
             lcd.fill(0)
@@ -77,9 +91,19 @@ def start(lcd, power, button):
                 start = row * W * 2
                 screen[start:start + W * 2] = source
             name = read_name(f, name_offset).upper()
+            current_name = name
             # Draw a footer band with the Pokémon number (white) before the name (orange).
             lcd.fill_rect(0, 216, 240, 24, BLACK)
-            num_label = str(number)
+            # Form IDs above 10000 are PokeAPI identifiers, not Pokédex numbers.
+            if number >= 10000:
+                try:
+                    with open('/pokemon_dex.bin', 'rb') as dex:
+                        dex.seek((number - 10000) * 2)
+                        entry = dex.read(2)
+                    number = struct.unpack('<H', entry)[0] if len(entry) == 2 else 0
+                except OSError:
+                    number = 0
+            num_label = str(number) if number else '?'
             max_chars = 30  # 240px / 8px font
             if name:
                 total = len(num_label) + 1 + len(name)
@@ -117,6 +141,9 @@ def start(lcd, power, button):
             count = struct.unpack('<I', f.read(4))[0]
         if not count:
             raise OSError('No images')
+        with open('/pokemon_order.bin', 'rb') as order:
+            if struct.unpack('<H', order.read(2))[0] != count:
+                raise OSError('Artwork order mismatch')
     except Exception as e:
         print('SD setup error:', e)
         message('SD CARD ERROR', 'Reconnect the card')
@@ -139,25 +166,42 @@ def start(lcd, power, button):
         return
     print('Motion sensor ready')
 
+    # The touch controller shares I2C1 with the motion sensor.
+    touch_ready = False
+    try:
+        touch_reset = Pin(16, Pin.OUT)
+        touch_reset.value(0)
+        time.sleep_ms(100)
+        touch_reset.value(1)
+        time.sleep_ms(100)
+        if imu.readfrom_mem(0x15, 0xA7, 1)[0] == 0xB6:
+            imu.writeto_mem(0x15, 0xFE, b'\x01')  # disable auto-sleep
+            imu.writeto_mem(0x15, 0xFA, b'\x41')  # touch point mode
+            touch_ready = True
+            print('Touch controller ready')
+    except OSError as e:
+        print('Touch unavailable:', e)
+
     # Power-on splash: show the user-provided image with a welcome text.
     try:
         with open('/poweron_art.dat', 'rb') as f:
             screen = memoryview(lcd.buffer)
             f.readinto(screen)
         lcd.fill_rect(0, 216, 240, 24, 0x0000)
-        lcd.text('WELCOME TO PICODEX', (240 - len('WELCOME TO PICODEX')*8)//2, 224, ORANGE)
+        lcd.text('BIENVENIDO A PICODEX', (240 - len('BIENVENIDO A PICODEX')*8)//2, 224, ORANGE)
         lcd.show()
         time.sleep_ms(2000)
     except Exception as e:
         print('Splash skip:', e)
 
     index = 0  # always start from the first Pokémon on every power-on
-    index = 0  # always start from the first Pokémon on every power-on
-    last_motion = time.ticks_ms()
+    last_motion = time.ticks_add(time.ticks_ms(), -MOTION_COOLDOWN)
     last_sample = time.ticks_ms()
     previous = None
     motion_samples = 0          # consecutive samples above threshold
-    MOTION_NEEDED = 3          # require ~3 sustained samples (~300ms) of motion
+    motion_armed = True
+    still_samples = 0
+    MOTION_NEEDED = 2          # two samples (~200ms); reject isolated bumps
     try:
         show_sprite(index)
     except Exception as e:
@@ -189,6 +233,11 @@ def start(lcd, power, button):
     right_prev = 1
     left_down_since = None
     right_down_since = None
+    touch_down = False
+    touch_since = 0
+    touch_x = 0
+    touch_y = 0
+    touch_used = False
 
     while True:
         try:
@@ -197,6 +246,55 @@ def start(lcd, power, button):
             left = _debounce(left_btn, left_prev)
             right = _debounce(right_btn, right_prev)
             now = time.ticks_ms()
+
+            if touch_ready and not shutdown:
+                try:
+                    point = imu.readfrom_mem(0x15, 0x02, 5)
+                    touching = bool(point[0] & 0x0f)
+                    if touching:
+                        x = ((point[1] & 0x0f) << 8) | point[2]
+                        y = ((point[3] & 0x0f) << 8) | point[4]
+                        if not touch_down:
+                            touch_since = now
+                            touch_x, touch_y = x, y
+                            touch_used = False
+                            if description_open:
+                                if description_page+1 < description_pages:
+                                    description_page += 1
+                                    from dex_description import show as next_page
+                                    description_pages = next_page(lcd, current_art_id, current_name, description_page)
+                                    import sys
+                                    del sys.modules['dex_description']
+                                    del next_page
+                                else:
+                                    show_sprite(index)
+                                touch_used = True
+                        if not touch_used and 80 <= touch_x < 160 and 40 <= touch_y < 200:
+                            if not (80 <= x < 160 and 40 <= y < 200):
+                                touch_used = True
+                            elif time.ticks_diff(now, touch_since) >= 800:
+                                import gc
+                                gc.collect()
+                                from dex_description import show as show_description
+                                description_page = 0
+                                description_pages = show_description(lcd, current_art_id, current_name)
+                                import sys
+                                del sys.modules['dex_description']
+                                del show_description
+                                gc.collect()
+                                description_open = True
+                                touch_used = True
+                                previous = None
+                                motion_samples = 0
+                    elif touch_down and not touch_used and not description_open:
+                        if 0 <= touch_x < 80 or 160 <= touch_x < 240:
+                            index = (index + (-1 if touch_x < 120 else 1)) % count
+                            show_sprite(index)
+                            previous = None
+                            motion_samples = 0
+                    touch_down = touching
+                except OSError:
+                    touch_down = False
 
             # Left button: short press -> previous; long press -> power off
             if left != left_prev:
@@ -254,31 +352,43 @@ def start(lcd, power, button):
                         motion_samples = 0
                         right_down_since = None
 
-            if not shutdown and time.ticks_diff(now, last_sample) >= 100:
+            # Sustained movement chooses a different random artwork entry.
+            # One change per shake; re-arm after half a second of calm.
+            if not shutdown and not description_open and not touch_down and left and right and time.ticks_diff(now, last_sample) >= 100:
                 last_sample = now
                 try:
-                    raw = imu.readfrom_mem(0x6b, 0x35, 12)
-                    values = [raw[i] | (raw[i + 1] << 8) for i in range(0, 12, 2)]
-                    values = [v - 65536 if v >= 32768 else v for v in values]
-                    if previous is not None:
-                        acceleration = max(abs(values[i] - previous[i]) for i in range(3))
-                        rotation = max(abs(values[i]) for i in range(3, 6))
-                        if (acceleration > 2200 or rotation > 5000):
-                            motion_samples += 1
-                        else:
-                            motion_samples = 0
-                        if (motion_samples >= MOTION_NEEDED
-                                and time.ticks_diff(now, last_motion) >= MOTION_COOLDOWN):
+                    xyz = struct.unpack('<hhh', imu.readfrom_mem(0x6b, 0x35, 6))
+                    delta = sum(abs(xyz[i] - previous[i]) for i in range(3)) if previous is not None else 0
+                    previous = xyz
+                    if not motion_armed:
+                        still_samples = still_samples+1 if delta < 1000 else 0
+                        if still_samples >= 5:
+                            motion_armed = True
+                            still_samples = 0
+                        motion_samples = 0
+                    else:
+                        motion_samples = motion_samples + 1 if delta > MOTION_THRESHOLD else 0
+                        if count > 1 and motion_samples >= MOTION_NEEDED and time.ticks_diff(now, last_motion) >= MOTION_COOLDOWN:
+                            motion_armed = False
+                            still_samples = 0
+                            candidate = random.randrange(count - 1)
+                            if candidate >= index:
+                                candidate += 1
                             last_motion = now
-                            motion_samples = 0
-                            index = random.randrange(count)  # random Pokémon
-                            show_sprite(index)
                             previous = None
-                            continue
-                    previous = values
-                except OSError:
+                            motion_samples = 0
+                            show_sprite(candidate)
+                            index = candidate
+                            last_motion = time.ticks_ms()
+                            print('PICODEX shuffled')
+                except OSError as e:
                     previous = None
                     motion_samples = 0
+                    print('PICODEX motion/read error:', e)
+            elif shutdown or description_open or touch_down or not left or not right:
+                previous = None
+                motion_samples = 0
+
             time.sleep_ms(50)
         except Exception as e:
             # Never let a transient error kill the frame; log and keep going.

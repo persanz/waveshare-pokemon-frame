@@ -1,0 +1,15 @@
+{
+  "artwork_entries": 1538,
+  "indexed_artwork_numbers": 1347,
+  "official_matching_version_entries": 890,
+  "translated_entries": 648,
+  "cached_pairs_compared_by_assistant": 530,
+  "review_overrides": 175,
+  "all_archive_ids_resolve": true,
+  "english_original_hashes_unchanged": true,
+  "all_description_characters_supported": true,
+  "synthetic_three_page_test": "passed",
+  "compiler": "mpy-cross 1.29.0 / mpy v6.3",
+  "device_deployed": false,
+  "device_verification": "Serial port exists but no REPL response. No Spanish upload completed. Reconnect/power-cycle board and retry staged upload; verify display and return to artwork on hardware."
+}
