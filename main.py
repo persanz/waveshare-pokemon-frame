@@ -12,6 +12,8 @@ try:
     os.remove('/launch_once')
 except OSError:
     choice = ''
+charge_seen = choice.endswith(':1')
+choice = choice.split(':')[0]
 from lcd import LCD_1inch54
 gc.collect()
 lcd = LCD_1inch54()
@@ -27,10 +29,14 @@ if choice not in ('companion_app', 'frame_app'):
     import boot_menu
     choice = boot_menu.choose(lcd, power, button)
     with open('/launch_once', 'w') as f:
-        f.write(choice)
+        import power_screen
+        f.write(choice + (':1' if power_screen.suppressed else ''))
     os.sync()
     from machine import soft_reset
     soft_reset()
+import power_screen
+power_screen.suppressed = charge_seen
+del power_screen
 print('Launching', choice)
 gc.collect()
 app = __import__(choice)

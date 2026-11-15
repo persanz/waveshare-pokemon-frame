@@ -209,7 +209,19 @@ def start(lcd, power, button):
         print('Artwork error:', e)
         error('ERROR DE IMAGEN - REVISA SD')
 
+    from power_screen import Monitor
+    charging = Monitor()
+    del Monitor
     while True:
+        before_charge = time.ticks_ms()
+        if charging.poll(lcd, bus if touch_ready else None, button, power, wdt, save):
+            elapsed = time.ticks_diff(time.ticks_ms(), before_charge)
+            last_tick = time.ticks_add(last_tick, elapsed)
+            notice_until = time.ticks_add(notice_until, elapsed)
+            previous, movement = None, 0
+            touched = False
+            right_was = right.value()
+            left_since = None
         if wdt:
             wdt.feed()
         now = time.ticks_ms()

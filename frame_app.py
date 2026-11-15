@@ -27,26 +27,8 @@ def start(lcd, power, button):
 
 
     def draw_goodbye():
-        """Procedural goodbye frame: Poké Ball + text."""
-        import math
-        RED = 0x00f8  # byte-swapped RGB565 red for this display
-        Cx = 120
-        R = 60
-        cy = 110
-        lcd.fill(0)
-        for y in range(cy - R, cy + R + 1):
-            dy = y - cy
-            hw = int(math.sqrt(max(0, R*R - dy*dy)))
-            if dy < 0:
-                lcd.hline(Cx - hw, y, 2*hw, RED)
-            else:
-                lcd.hline(Cx - hw, y, 2*hw, WHITE)
-        lcd.fill_rect(Cx - R, cy - 3, 2*R, 6, 0x0000)
-        lcd.ellipse(Cx, cy, 16, 16, 0x0000, True)
-        lcd.ellipse(Cx, cy, 10, 10, WHITE, True)
-        lcd.ellipse(Cx, cy, 5, 5, 0x0000, True)
-        lcd.text('GOODBYE!', (240 - len('GOODBYE!')*8)//2, 200, WHITE)
-        lcd.show()
+        from shutdown_screen import draw
+        draw(lcd)
 
 
     def read_name(f, name_offset):
@@ -69,9 +51,26 @@ def start(lcd, power, button):
     description_page = 0
     description_pages = 1
 
+    def cache_artwork():
+        # Reuse the flash-backed snapshot technique used by the charging screen.
+        # A second framebuffer will not fit in the MicroPython heap.
+        with open('/picodex-return.tmp', 'wb') as f:
+            f.write(lcd.buffer)
+
+    def restore_artwork():
+        nonlocal description_open
+        with open('/picodex-return.tmp', 'rb') as f:
+            if f.readinto(lcd.buffer) != len(lcd.buffer):
+                raise OSError('Incomplete artwork snapshot')
+        lcd.show()
+        description_open = False
+        os.remove('/picodex-return.tmp')
+
     def show_sprite(index):
         nonlocal current_art_id, current_name, description_open
-        description_open = False
+        # Release description-rendering garbage before allocating the decoder.
+        import gc
+        gc.collect()
         # The order file maps Pokédex order to entries in the artwork archive.
         with open('/pokemon_order.bin', 'rb') as order:
             order.seek(2 + index * 2)
@@ -86,6 +85,8 @@ def start(lcd, power, button):
             screen = memoryview(lcd.buffer)
             source = bytearray(W * 2)
             for row in range(W):
+                if row % 24 == 0:
+                    gc.collect()
                 if stream.readinto(source) != W * 2:
                     raise OSError('Incomplete sprite')
                 start = row * W * 2
@@ -130,6 +131,7 @@ def start(lcd, power, button):
             else:
                 lcd.text(num_label, (240 - len(num_label)*8)//2, 224, WHITE)
             lcd.show()
+        description_open = False
         print('Displaying Pokemon', number, name)
 
 
@@ -153,7 +155,7 @@ def start(lcd, power, button):
     imu = None
     for attempt in range(5):
         try:
-            imu = I2C(1, sda=Pin(6), scl=Pin(7), freq=50000)
+            imu = I2C(1, sda=Pin(6), scl=Pin(7), freq=50000, timeout=50000)
             for reg, val in ((2, 0x60), (3, 0x23), (4, 0x53), (5, 0), (6, 0x11), (7, 0), (8, 3)):
                 imu.writeto_mem(0x6b, reg, bytes([val]))
             break
@@ -239,62 +241,24 @@ def start(lcd, power, button):
     touch_y = 0
     touch_used = False
 
+    from power_screen import Monitor
+    charging = Monitor()
+    del Monitor
     while True:
         try:
+            if charging.poll(lcd, imu if touch_ready else None, left_btn, power, wdt):
+                touch_down = False
+                touch_used = True
+                previous = None
+                motion_samples = 0
+                left_prev = left_btn.value()
+                right_prev = right_btn.value()
+                left_down_since = right_down_since = None
             if wdt is not None:
                 wdt.feed()
             left = _debounce(left_btn, left_prev)
             right = _debounce(right_btn, right_prev)
             now = time.ticks_ms()
-
-            if touch_ready and not shutdown:
-                try:
-                    point = imu.readfrom_mem(0x15, 0x02, 5)
-                    touching = bool(point[0] & 0x0f)
-                    if touching:
-                        x = ((point[1] & 0x0f) << 8) | point[2]
-                        y = ((point[3] & 0x0f) << 8) | point[4]
-                        if not touch_down:
-                            touch_since = now
-                            touch_x, touch_y = x, y
-                            touch_used = False
-                            if description_open:
-                                if description_page+1 < description_pages:
-                                    description_page += 1
-                                    from dex_description import show as next_page
-                                    description_pages = next_page(lcd, current_art_id, current_name, description_page)
-                                    import sys
-                                    del sys.modules['dex_description']
-                                    del next_page
-                                else:
-                                    show_sprite(index)
-                                touch_used = True
-                        if not touch_used and 80 <= touch_x < 160 and 40 <= touch_y < 200:
-                            if not (80 <= x < 160 and 40 <= y < 200):
-                                touch_used = True
-                            elif time.ticks_diff(now, touch_since) >= 800:
-                                import gc
-                                gc.collect()
-                                from dex_description import show as show_description
-                                description_page = 0
-                                description_pages = show_description(lcd, current_art_id, current_name)
-                                import sys
-                                del sys.modules['dex_description']
-                                del show_description
-                                gc.collect()
-                                description_open = True
-                                touch_used = True
-                                previous = None
-                                motion_samples = 0
-                    elif touch_down and not touch_used and not description_open:
-                        if 0 <= touch_x < 80 or 160 <= touch_x < 240:
-                            index = (index + (-1 if touch_x < 120 else 1)) % count
-                            show_sprite(index)
-                            previous = None
-                            motion_samples = 0
-                    touch_down = touching
-                except OSError:
-                    touch_down = False
 
             # Left button: short press -> previous; long press -> power off
             if left != left_prev:
@@ -351,6 +315,57 @@ def start(lcd, power, button):
                         previous = None
                         motion_samples = 0
                         right_down_since = None
+
+            if touch_ready and not shutdown:
+                try:
+                    point = imu.readfrom_mem(0x15, 0x02, 5)
+                    touching = bool(point[0] & 0x0f)
+                    was_touching = touch_down
+                    touch_down = touching
+                    if touching:
+                        x = ((point[1] & 0x0f) << 8) | point[2]
+                        y = ((point[3] & 0x0f) << 8) | point[4]
+                        if not was_touching:
+                            touch_since = now
+                            touch_x, touch_y = x, y
+                            touch_used = False
+                            if description_open:
+                                if description_page+1 < description_pages:
+                                    description_page += 1
+                                    from dex_description import show as next_page
+                                    description_pages = next_page(lcd, current_art_id, current_name, description_page)
+                                    import sys
+                                    del sys.modules['dex_description']
+                                    del next_page
+                                else:
+                                    restore_artwork()
+                                touch_used = True
+                        if not touch_used and 80 <= touch_x < 160 and 40 <= touch_y < 200:
+                            if not (80 <= x < 160 and 40 <= y < 200):
+                                touch_used = True
+                            elif time.ticks_diff(now, touch_since) >= 800:
+                                import gc
+                                gc.collect()
+                                cache_artwork()
+                                from dex_description import show as show_description
+                                description_page = 0
+                                description_pages = show_description(lcd, current_art_id, current_name)
+                                import sys
+                                del sys.modules['dex_description']
+                                del show_description
+                                gc.collect()
+                                description_open = True
+                                touch_used = True
+                                previous = None
+                                motion_samples = 0
+                    elif was_touching and not touch_used and not description_open:
+                        if 0 <= touch_x < 80 or 160 <= touch_x < 240:
+                            index = (index + (-1 if touch_x < 120 else 1)) % count
+                            show_sprite(index)
+                            previous = None
+                            motion_samples = 0
+                except OSError:
+                    touch_down = False
 
             # Sustained movement chooses a different random artwork entry.
             # One change per shake; re-arm after half a second of calm.

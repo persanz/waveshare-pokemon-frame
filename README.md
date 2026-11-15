@@ -2,9 +2,16 @@
 
 Two offline Pokémon apps for the Waveshare RP2350-Touch-LCD-1.54, with 1,538 artwork entries on an SD card. The project includes firmware sources, compiled MicroPython modules, artwork archives, Spanish descriptions, preserved English descriptions, and the assets needed to reproduce the build.
 
+## Printable quick guide
+
+[Guía rápida en español · A4, dos caras](docs/guia/Guia-rapida-Pokemon-A4.pdf)
+includes child-friendly instructions and six recreated screen images. Print at
+100% on A4, double-sided with long-edge binding. Build source and image notes
+are in [docs/guia/LEEME.md](docs/guia/LEEME.md).
+
 ## Startup and controls
 
-A Pokémon logo and Poké Ball splash shows **Cargando....** for five seconds, then opens the graphical **ELIGE TU MUNDO** menu. Tap Pikachu for **Virtual Pokemon** or the red Pokédex for **PICODEX**. The left hardware button selects Virtual Pokemon; the right selects PICODEX. Selecting an app performs a clean soft restart so it has enough memory for artwork. Restart the board to return to the menu.
+A Pokémon logo and Poké Ball splash shows **Loading....** for five seconds, then opens the graphical **ELIGE TU MUNDO** menu. Tap Pikachu for **Virtual Pokemon** or the red Pokédex for **PICODEX**. The left hardware button selects Virtual Pokemon; the right selects PICODEX. Selecting an app performs a clean soft restart so it has enough memory for artwork. Restart the board to return to the menu.
 
 Hold the left hardware button for 1.5 seconds to show the red Poké Ball goodbye screen and shut down on battery. USB can keep the board powered after the screen goes off.
 
@@ -31,6 +38,8 @@ Firmware targets MicroPython 1.29, mpy format v6.3. Upload these files to the bo
 
 ```text
 main.py
+power_screen.mpy
+charge_overlay.mpy
 boot_menu.mpy
 boot_splash.mpy
 boot_splash.dat
@@ -92,3 +101,88 @@ uv run --with pillow --with resvg-py python build_boot_splash.py
 ```
 
 Pokémon artwork, names and trademarks belong to their respective owners.
+
+## Charging overlay
+
+After the five-second splash, a stable board power indication opens a black
+screen with a large voltage-derived percentage inside a ring: red below 20%,
+orange from 20–69%, green from 70%. The labels remain Spanish, without an
+ESTIMADO label. Tap anywhere to restore the exact previous menu, artwork,
+description page or companion framebuffer; that gesture is consumed. The
+companion care clock pauses while the overlay is visible. Long-left shutdown
+remains available and saves care state. An inactive indication for 700 ms also
+closes the overlay. `/charge-screen.tmp` stores its framebuffer in internal
+flash, avoiding a second 115,200-byte RAM allocation.
+
+### Power signal and limitations
+
+The [Waveshare schematic](https://files.waveshare.com/wiki/RP2350-Touch-LCD-1.54/RP2350-Touch-LCD-1.54.pdf)
+routes ETA6098 BAT_STAT through Q4/R50/R51 to GPIO17; it does not expose a
+separate VBUS-sense GPIO. The old board `charging.py` assumed active-low input.
+A physical cable-cycle recording on this board on 2026-11-13 instead showed
+GPIO17 high while USB was connected, low during unplug, and high on reconnect,
+with battery readings around 4.03 V. The recorder sampled every 500 ms; its
+116-sample CSV is in the ignored local
+`device-backups/power-diagnostics/reconnect.csv`. Firmware now uses this measured
+high-on-USB behaviour, without enabling an internal pull resistor.
+
+The prompt requires 700 ms high, remains dismissed while high, and re-arms only
+after 1,500 ms low. Dismissal carries across the menu's app soft restart. Both
+apps keep the small monitor alive after dismissal to observe the low interval;
+only the overlay and battery-reading code load on demand.
+
+**This is a board-specific, experimentally verified heuristic, not a universal
+VBUS detector.** GPIO17 behaviour during every ETA6098 charging/termination,
+fault and absent-battery state has not been measured. Such changes could mimic
+a cable transition, and another board revision may differ. No button or touch
+GPIO is repurposed. USB presence never implies a full battery.
+
+GPIO29 reads BAT_ADC through R27=200k / R32=100k (3:1), matching the original
+Waveshare demo. The ADC uses a nominal 3.3 V reference. The display curve was rescaled to
+map the observed approximately 4.02 V plateau to 100%, rather than requiring
+4.20 V. This is an empirical display adjustment, not a multimeter calibration
+or independent confirmation that the cell is fully charged. Intermediate curve
+points were also rescaled and have not been individually measured. Eight
+readings are averaged and filtered with a 1/4 exponential update. Load,
+charging, temperature and cell age affect this estimate; it is not a fuel gauge.
+Values outside 2.50–4.35 V show `--%` and `BATERIA NO VERIFICADA`. An absent
+battery whose charger voltage looks valid cannot be distinguished reliably.
+
+### Open issue: charging screen on battery-only startup
+
+The owner reports that the charging screen also opens on battery-only power-on.
+The current 700 ms GPIO17-high startup rule has not resolved that case. Do not
+interpret the cable-cycle test as proof of reliable startup power detection.
+A battery-only boot capture is still needed before choosing a longer startup
+verification interval or requiring an observed low-to-high transition.
+
+`power_screen.py` currently includes temporary startup logging to `/bootlog.csv`:
+GPIO17 and nominal battery voltage are sampled at most every 250 ms during the
+first 15 seconds after the module loads. The file is capped around 1,500 bytes
+by removing older samples. This diagnostic can write flash during startup and
+should be removed after power detection is resolved. It does not change care
+state. Board copies and raw diagnostic logs remain in ignored `device-backups/`.
+
+### Description return and verification
+
+The USB-powered description-return failure was captured live as repeated
+`memory allocation failed, allocating 1024 bytes` errors. Closing a description
+now restores `/picodex-return.tmp`, a saved artwork framebuffer, instead of
+decompressing artwork again. Pagination leaves this snapshot untouched.
+Power-button handling runs before touch rendering, and touch edges are committed
+before rendering so a failed action cannot repeat while held. Shared I2C reads
+have a 50 ms timeout. PICODEX shares the existing goodbye renderer.
+
+Twelve host tests cover care state, voltage mapping, filtering, power debounce,
+dismissal, re-arming, failed-overlay retries and snapshot integrity. Modules
+compile with MicroPython 1.29 mpy-cross (format v6.3); changed device modules
+are backed up and staged SHA-256 checks run before activation.
+
+`tests/hardware_description_return.py` and
+`tests/hardware_description_shutdown.py` use simulated touch/button inputs with
+the real LCD and SD artwork. Compile/upload as `.mpy` modules before importing;
+source execution uses extra heap. They confirm byte-identical description
+return and shutdown reaching the power latch despite touch read errors.
+The charging overlay also passed a simulated-tap byte-identical restoration
+check and red/orange/green renders. Physical power cutoff, full charging-state
+coverage and sensitivity still require owner handling.

@@ -13,7 +13,7 @@ def show(lcd):
         print('Boot splash unavailable:', e)
         return
     lcd.fill_rect(0, 215, 240, 25, 0x4100)
-    lcd.text('Cargando....', 72, 222, 0xffff)
+    lcd.text('Loading....', (240 - len('Loading....') * 8) // 2, 222, 0xffff)
     lcd.show()
     started = time.ticks_ms()
     print('Boot splash displayed')

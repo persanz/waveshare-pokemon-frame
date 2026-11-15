@@ -80,9 +80,14 @@ def choose(lcd, power, left):
         print('Menu touch unavailable; use buttons:', e)
         bus = None
     # Ignore the power-on press and wait for a fresh input.
+    from power_screen import Monitor
+    charging = Monitor()
     armed = False
     left_since = None
     while True:
+        if charging.poll(lcd, bus, left, power):
+            armed = False
+            left_since = None
         now = time.ticks_ms()
         down = False
         point = None

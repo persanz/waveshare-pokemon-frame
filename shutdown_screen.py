@@ -22,7 +22,7 @@ def draw(lcd):
     lcd.ellipse(Cx, cy, 16, 16, 0, True)
     lcd.ellipse(Cx, cy, 10, 10, WHITE, True)
     lcd.ellipse(Cx, cy, 5, 5, 0, True)
-    lcd.text('ADIOS!', (240 - len('ADIOS!') * 8) // 2, 200, WHITE)
+    lcd.text('GOODBYE!', (240 - len('GOODBYE!') * 8) // 2, 200, WHITE)
     lcd.show()
 
 
